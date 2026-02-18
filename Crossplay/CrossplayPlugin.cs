@@ -19,17 +19,12 @@ namespace Crossplay
     {
         private readonly Dictionary<int, string> _supportedVersions = new()
         {
-            { 269, "v1.4.4" },
-            { 270, "v1.4.4.1" },
-            { 271, "v1.4.4.2" },
-            { 272, "v1.4.4.3" },
-            { 273, "v1.4.4.4" },
-            { 274, "v1.4.4.5" },
-            { 275, "v1.4.4.6" },
-            { 276, "v1.4.4.7" },
-            { 277, "v1.4.4.8" },
-            { 278, "v1.4.4.8.1" },
-            { 279, "v1.4.4.9" },
+            { 312, "v1.4.5" },
+            { 313, "v1.4.5.1" },
+            { 314, "v1.4.5.2" },
+            { 315, "v1.4.5.3" },
+            { 316, "v1.4.5.4" },
+            { 317, "v1.4.5.5" },
         };
 
         public override string Name => "Crossplay";
@@ -38,7 +33,7 @@ namespace Crossplay
 
         public override string Description => "Enables crossplay for terraria";
 
-        public override Version Version => new("2.2");
+        public override Version Version => new("2.5");
 
         public CrossplayConfig Config { get; } = new();
 
@@ -50,17 +45,12 @@ namespace Crossplay
 
         public readonly Dictionary<int, int> MaxItems = new()
         {
-            { 269, 5453 },
-            { 270, 5453 },
-            { 271, 5453 },
-            { 272, 5453 },
-            { 273, 5453 },
-            { 274, 5456 },
-            { 275, 5456 },
-            { 276, 5456 },
-            { 277, 5456 },
-            { 278, 5456 },
-            { 279, 5456 },
+            { 312, 6100 },
+            { 313, 6100 },
+            { 314, 6100 },
+            { 315, 6100 },
+            { 316, 6100 },
+            { 317, 6100 },
         };
 
         public CrossplayPlugin(Main game) : base(game)
@@ -71,9 +61,9 @@ namespace Crossplay
 
         public override void Initialize()
         {
-            if (!_supportedVersions.TryGetValue(Main.curRelease, out string version) || version != Main.versionNumber)
+            if (!_supportedVersions.ContainsKey(Main.curRelease))
             {
-                throw new NotSupportedException("The provided version of this plugin is outdated and will not function properly. Check for any updates here: https://github.com/Moneylover3246/Crossplay");
+                Console.WriteLine($"[Crossplay] Warning: Server version {Main.curRelease} is not explicitly supported. Plugin loading anyway.");
             }
 
             On.Terraria.Net.NetManager.Broadcast_NetPacket_int += NetModuleHandler.OnBroadcast;
@@ -139,7 +129,7 @@ namespace Crossplay
             StringBuilder sb = new StringBuilder()
                 .Append("Crossplay has been enabled & has whitelisted the following versions:\n")
                 .Append(string.Join(", ", _supportedVersions.Values))
-                .Append("\n\nIf there are any issues please report them here: https://github.com/Moneylover3246/Crossplay");
+                .Append("\n\nIf there are any issues please report them here: https://github.com/RuriChoco/Terraria-Crossplay/issues");
 
             Console.ForegroundColor = ConsoleColor.Magenta;
             Console.WriteLine("-------------------------------------");
@@ -188,9 +178,10 @@ namespace Crossplay
                             NetMessage.SendData(9, args.Msg.whoAmI, -1, NetworkText.FromLiteral("Fixing Version..."), 1);
                             byte[] connectRequest = new PacketFactory()
                                 .SetType(1)
-                                .PackString($"Terraria279")
+                                .PackString($"Terraria{Main.curRelease}")
                                 .GetByteData();
-                            Log($"Changing version of index {args.Msg.whoAmI} from {_supportedVersions[versionNumber]} => {_supportedVersions[279]}", color: ConsoleColor.Green);
+                            string targetVersion = _supportedVersions.ContainsKey(Main.curRelease) ? _supportedVersions[Main.curRelease] : $"Unknown(v{Main.curRelease})";
+                            Log($"Changing version of index {args.Msg.whoAmI} from {_supportedVersions[versionNumber]} => {targetVersion}", color: ConsoleColor.Green);
 
                             Buffer.BlockCopy(connectRequest, 0, args.Msg.readBuffer, args.Index - 3, connectRequest.Length);
                         }
@@ -202,7 +193,7 @@ namespace Crossplay
                                 return;
                             }
                             ref byte gameModeFlags = ref args.Msg.readBuffer[args.Length - 1];
-                            if (Main.GameModeInfo.IsJourneyMode)
+                            if (Main.GameMode == 3)
                             {
                                 if ((gameModeFlags & 8) != 8)
                                 {

@@ -33,7 +33,8 @@ namespace Crossplay
                     {
                         var itemNetID = Unsafe.As<byte, short>(ref packet.Buffer.Data[3]); // https://unsafe.as/
                         
-                        if (itemNetID > CrossplayPlugin.Instance.MaxItems[CrossplayPlugin.Instance.ClientVersions[playerId]])
+                        if (CrossplayPlugin.Instance.MaxItems.TryGetValue(CrossplayPlugin.Instance.ClientVersions[playerId], out int maxItem) &&
+                            itemNetID > maxItem)
                         {
                             return true;
                         }
