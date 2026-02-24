@@ -41,3 +41,14 @@ jobs:
         draft: false
         generate_release_notes: true
         files: Crossplay/bin/Release/net9.0/Crossplay.dll
+
+    - name: Release (Nightly)
+      if: github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: nightly
+        name: Nightly Build
+        body: "Latest automatic build from main branch."
+        draft: false
+        prerelease: true
+        files: Crossplay/bin/Release/net9.0/Crossplay.dll
