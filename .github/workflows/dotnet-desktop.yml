@@ -3,12 +3,16 @@ name: Build Crossplay Plugin
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - "v*"
   pull_request:
     branches: [ "main" ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     - uses: actions/checkout@v4
@@ -29,3 +33,9 @@ jobs:
       with:
         name: Crossplay.dll
         path: Crossplay/bin/Release/net9.0/Crossplay.dll
+
+    - name: Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: Crossplay/bin/Release/net9.0/Crossplay.dll
