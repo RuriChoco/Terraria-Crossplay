@@ -1,0 +1,10 @@
+feature:
+  - head-branch: ['^feature/', '^feat/']
+bug:
+  - head-branch: ['^bug/', '^fix/']
+chore:
+  - head-branch: ['^chore/']
+  - changed-files: ['.github/**']
+documentation:
+  - head-branch: ['^docs/', '^doc/']
+  - changed-files: ['*.md']
