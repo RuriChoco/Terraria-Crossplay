@@ -28,6 +28,9 @@ jobs:
     - name: Build
       run: dotnet build Crossplay/Crossplay.csproj --configuration Release --no-restore
 
+    # - name: Test
+    #   run: dotnet test Crossplay.Tests/Crossplay.Tests.csproj --configuration Release --verbosity normal
+
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:

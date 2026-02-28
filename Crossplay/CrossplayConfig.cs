@@ -1,4 +1,5 @@
-﻿using Newtonsoft.Json;
+﻿﻿using Newtonsoft.Json;
+using System.Collections.Generic;
 using TShockAPI.Configuration;
 
 namespace Crossplay
@@ -10,6 +11,9 @@ namespace Crossplay
 
         [JsonProperty("debug_mode")]
         public bool DebugMode = false;
+
+        [JsonProperty("whitelisted_projectiles")]
+        public List<int> WhitelistedProjectiles = new List<int> { 33 };
     }
 
     public class CrossplayConfig : ConfigFile<CrossplaySettings>
