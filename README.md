@@ -48,6 +48,9 @@ The plugin creates a `Crossplay.json` file in your `tshock` folder.
 | `/crossplay reload` | `crossplay.settings` | Reloads the configuration file from disk. |
 | N/A | `crossplay.bypass` | **Required** for players to benefit from the projectile bypass fixes. |
 
+## Changelog
+View the full changelog here.
+
 ## Bugs & Issues
 Bugs or other issues with this plugin should be reported as an issue to this page. Feel free to open a ticket!
 

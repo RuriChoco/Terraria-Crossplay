@@ -38,12 +38,20 @@ jobs:
         name: Crossplay.dll
         path: Crossplay/bin/Release/net9.0/Crossplay.dll
 
+    - name: Get Changelog Entry
+      id: changelog_reader
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: mindsers/changelog-reader-action@v2
+      with:
+        validation_level: none
+        path: ./CHANGELOG.md
+
     - name: Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
         draft: false
-        generate_release_notes: true
+        body: ${{ steps.changelog_reader.outputs.changes }}
         files: Crossplay/bin/Release/net9.0/Crossplay.dll
 
     - name: Release (Nightly)
