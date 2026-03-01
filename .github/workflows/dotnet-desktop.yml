@@ -3,8 +3,6 @@ name: Build Crossplay Plugin
 on:
   push:
     branches: [ "main" ]
-    tags:
-      - "v*"
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
@@ -21,7 +19,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 9.0.x
+        dotnet-version: 6.0.x
 
     - name: Restore dependencies
       run: dotnet restore Crossplay/Crossplay.csproj
@@ -36,20 +34,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: Crossplay.dll
-        path: Crossplay/bin/Release/net9.0/Crossplay.dll
-
-    - name: Get Changelog Entry
-      id: changelog_reader
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: mindsers/changelog-reader-action@v2
-      with:
-        validation_level: none
-        path: ./CHANGELOG.md
-
-    - name: Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2
-      with:
-        draft: false
-        body: ${{ steps.changelog_reader.outputs.changes }}
-        files: Crossplay/bin/Release/net9.0/Crossplay.dll
+        path: Crossplay/bin/Release/net6.0/Crossplay.dll

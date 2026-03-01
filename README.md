@@ -1,5 +1,5 @@
 # What is Crossplay?
-![Build Crossplay Plugin](https://github.com/RuriChoco/Terraria-Crossplay/actions/workflows/dotnet-desktop.yml/badge.svg) [![GitHub Release](https://img.shields.io/github/v/release/RuriChoco/Terraria-Crossplay)](https://github.com/RuriChoco/Terraria-Crossplay/releases/latest)
+![Build Crossplay Plugin](https://img.shields.io/github/actions/workflow/status/RuriChoco/Terraria-Crossplay/dotnet-desktop.yml?style=flat-square) [![GitHub Release](https://img.shields.io/github/v/release/RuriChoco/Terraria-Crossplay?style=flat-square)](https://github.com/RuriChoco/Terraria-Crossplay/releases/latest) [![GitHub Downloads](https://img.shields.io/github/downloads/RuriChoco/Terraria-Crossplay/total?style=flat-square)](https://github.com/RuriChoco/Terraria-Crossplay/releases)
 
 Crossplay allows for cross-platform play between all 1.4.5+ versions, ultimately closing the gap between Terraria on mobile and PC devices. This plugin works by modifying incoming packets sent from the client (and outgoing packets sent from the server) to match whatever game version the packets are being sent to. 
 
