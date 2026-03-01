@@ -1,7 +1,5 @@
-﻿﻿using System;
+﻿﻿﻿﻿using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.Runtime.CompilerServices;
 using Terraria;
 using Terraria.Net;
 
@@ -11,6 +9,13 @@ namespace Crossplay
     {
         internal static void OnBroadcast(On.Terraria.Net.NetManager.orig_Broadcast_NetPacket_int orig, NetManager self, NetPacket packet, int ignoreClient)
         {
+            // Optimization: Only intercept Item packets (ID 5), let vanilla handle the rest
+            if (packet.Id != 5)
+            {
+                orig(self, packet, ignoreClient);
+                return;
+            }
+
             for (int i = 0; i <= Main.maxPlayers; i++)
             {
                 if (i != ignoreClient && Netplay.Clients[i].IsConnected() && !InvalidNetPacket(packet, i))
@@ -22,6 +27,13 @@ namespace Crossplay
 
         internal static void OnSendToClient(On.Terraria.Net.NetManager.orig_SendToClient orig, NetManager self, NetPacket packet, int playerId)
         {
+            // Optimization: Only intercept Item packets (ID 5)
+            if (packet.Id != 5)
+            {
+                orig(self, packet, playerId);
+                return;
+            }
+
             if (!InvalidNetPacket(packet, playerId))
             {
                 orig(self, packet, playerId);
@@ -44,7 +56,7 @@ namespace Crossplay
                         {
                             return false;
                         }
-                        var itemNetID = MemoryMarshal.Cast<byte, short>(data.AsSpan(6))[0];
+                        short itemNetID = BitConverter.ToInt16(data, 6);
                         
                         if (maxItems.TryGetValue(clientVersion, out int maxItem) &&
                             itemNetID > maxItem)

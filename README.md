@@ -53,3 +53,5 @@ Bugs or other issues with this plugin should be reported as an issue to this pag
 
 ## Credits
 This plugin was created by **Moneylover3246**.
+
+This project was made using Gemini and tested working.

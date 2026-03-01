@@ -21,7 +21,7 @@ namespace Crossplay
         {
             long currentPosition = writer.BaseStream.Position;
             writer.BaseStream.Position = 2L;
-            writer.Write(type);
+            writer.Write((byte)type);
             writer.BaseStream.Position = currentPosition;
             return this;
         }

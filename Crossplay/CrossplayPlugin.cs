@@ -1,4 +1,4 @@
-﻿using System;
+﻿﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -36,7 +36,7 @@ namespace Crossplay
 
         public override string Description => "Enables crossplay for terraria";
 
-        public override Version Version => new("2.6");
+        public override Version Version => new("2.6.1");
 
         public CrossplayConfig Config { get; } = new();
 
@@ -174,16 +174,196 @@ namespace Crossplay
         private void OnGetData(GetDataEventArgs args)
         {
             int index = args.Msg.whoAmI;
-            using (var reader = new BinaryReader(new MemoryStream(args.Msg.readBuffer, args.Index, args.Length)))
+
+            // Optimization: Skip unnecessary allocations for unhandled packets
+            if (args.MsgID != PacketTypes.ConnectRequest &&
+                args.MsgID != PacketTypes.PlayerInfo &&
+                args.MsgID != PacketTypes.NpcAddBuff &&
+                args.MsgID != PacketTypes.ProjectileNew)
             {
-                if (ClientVersions[index] == 0 && args.MsgID != PacketTypes.ConnectRequest)
+                return;
+            }
+
+            // Optimization: Ignore packets from unknown clients (except ConnectRequest)
+            if (ClientVersions[index] == 0 && args.MsgID != PacketTypes.ConnectRequest)
+            {
+                return;
+            }
+
+            // Optimization: Handle ProjectileNew without allocations
+            if (args.MsgID == PacketTypes.ProjectileNew)
+            {
+                // Identity(2) + X(4) + Y(4) + VX(4) + VY(4) + Owner(1) = 19 bytes offset
+                if (args.Length < 22) return;
+
+                short type = BitConverter.ToInt16(args.Msg.readBuffer, args.Index + 19);
+
+                if (Config.Settings.DebugMode)
+                {
+                    using (var debugReader = new BinaryReader(new MemoryStream(args.Msg.readBuffer, args.Index, args.Length)))
+                    {
+                        debugReader.ReadInt16(); // Identity
+                        debugReader.ReadSingle(); // X
+                        debugReader.ReadSingle(); // Y
+                        debugReader.ReadSingle(); // VX
+                        debugReader.ReadSingle(); // VY
+                        debugReader.ReadByte();   // Owner
+                        short debugType = debugReader.ReadInt16();
+                        if (debugType != type)
+                        {
+                            Log($"[OFFSET ERROR] BitConverter read {type}, BinaryReader read {debugType}", true, ConsoleColor.Red);
+                        }
+                    }
+                }
+
+                // Whitelist specific projectiles here (e.g., Harpoon = 33)
+                if (Config.Settings.WhitelistedProjectiles.Contains(type))
+                {
+                    byte owner = args.Msg.readBuffer[args.Index + 18];
+
+                    // Security: Prevent spawning projectiles for other players
+                    if (owner != index) return;
+
+                    if (!TShock.Players[index].HasPermission("crossplay.bypass"))
+                    {
+                        Log($"Player {TShock.Players[index].Name} tried to use bypassed projectile {type} without permission.", color: ConsoleColor.Yellow);
+                        return;
+                    }
+
+                    short identity = BitConverter.ToInt16(args.Msg.readBuffer, args.Index);
+                    float x = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 2);
+                    float y = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 6);
+                    float vx = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 10);
+                    float vy = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 14);
+
+                    byte flags = args.Msg.readBuffer[args.Index + 21];
+
+                    // Validation: Ensure packet is large enough for the flags
+                    int requiredLength = 22;
+                    if ((flags & 1) == 1) requiredLength += 4;
+                    if ((flags & 2) == 2) requiredLength += 4;
+                    if ((flags & 4) == 4) requiredLength += 4;
+                    if (args.Length < requiredLength) return;
+
+                    float[] ai = new float[Projectile.maxAI];
+                    int offset = args.Index + 22;
+
+                    if ((flags & 1) == 1) { ai[0] = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+                    if ((flags & 2) == 2) { ai[1] = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+                    if ((flags & 4) == 4) { ai[2] = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+
+                    int projIndex = -1;
+                    // Find existing projectile to update
+                    for (int i = 0; i < Main.maxProjectiles; i++)
+                    {
+                        if (Main.projectile[i].active && Main.projectile[i].owner == owner && Main.projectile[i].identity == identity)
+                        {
+                            projIndex = i;
+                            break;
+                        }
+                    }
+                    // Or find a free slot
+                    if (projIndex == -1)
+                    {
+                        for (int i = 0; i < Main.maxProjectiles; i++)
+                        {
+                            if (!Main.projectile[i].active)
+                            {
+                                projIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (projIndex == -1) projIndex = Projectile.FindOldestProjectile();
+
+                    Projectile proj = Main.projectile[projIndex];
+                    if (!proj.active || proj.type != type)
+                    {
+                        proj.SetDefaults(type);
+                        proj.miscText = "";
+                    }
+                    proj.identity = identity;
+                    proj.position = new Microsoft.Xna.Framework.Vector2(x, y);
+                    proj.velocity = new Microsoft.Xna.Framework.Vector2(vx, vy);
+                    proj.owner = owner;
+                    proj.type = type;
+                    if ((flags & 1) == 1) proj.ai[0] = ai[0];
+                    if ((flags & 2) == 2) proj.ai[1] = ai[1];
+                    if ((flags & 4) == 4) proj.ai[2] = ai[2];
+                    proj.active = true;
+
+                    NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, index, null, projIndex);
+                    args.Handled = true;
+                }
+                return;
+            }
+
+            // Optimization: Handle NpcAddBuff without allocations
+            if (args.MsgID == PacketTypes.NpcAddBuff)
+            {
+                if (args.Length < 6) return;
+
+                short npcId = BitConverter.ToInt16(args.Msg.readBuffer, args.Index);
+                ushort buffType = BitConverter.ToUInt16(args.Msg.readBuffer, args.Index + 2);
+                int buffTime;
+
+                if (args.Length >= 8)
+                    buffTime = BitConverter.ToInt32(args.Msg.readBuffer, args.Index + 4);
+                else
+                    buffTime = BitConverter.ToInt16(args.Msg.readBuffer, args.Index + 4);
+
+                if (npcId >= 0 && npcId < Main.maxNPCs)
+                {
+                    if (Main.npc[npcId].active)
+                    {
+                        Main.npc[npcId].AddBuff(buffType, buffTime);
+                        NetMessage.SendData((int)PacketTypes.NpcAddBuff, -1, args.Msg.whoAmI, null, npcId, buffType, buffTime);
+                    }
+                    args.Handled = true;
+                }
+                return;
+            }
+
+            // Optimization: Handle PlayerInfo without allocations
+            if (args.MsgID == PacketTypes.PlayerInfo)
+            {
+                if (!Config.Settings.SupportJourneyClients)
                 {
                     return;
                 }
-                switch (args.MsgID)
+                if (args.Length < 1) return;
+                ref byte gameModeFlags = ref args.Msg.readBuffer[args.Index + args.Length - 1];
+                if (Main.GameMode == 3)
                 {
-                    case PacketTypes.ConnectRequest:
+                    if ((gameModeFlags & 8) != 8)
+                    {
+                        Log($"Enabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
+                        gameModeFlags |= 8;
+                        if (Main.ServerSideCharacter)
                         {
+                            NetMessage.SendData(4, args.Msg.whoAmI, -1, null, args.Msg.whoAmI);
+                        }
+                    }
+                    return;
+                }
+                if (TShock.Config.Settings.SoftcoreOnly && (gameModeFlags & 3) != 0)
+                {
+                    return;
+                }
+                if ((gameModeFlags & 8) == 8)
+                {
+                    Log($"Disabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
+                    gameModeFlags &= 247;
+                }
+                return;
+            }
+
+            if (args.MsgID == PacketTypes.ConnectRequest)
+            {
+                using (var reader = new BinaryReader(new MemoryStream(args.Msg.readBuffer, args.Index, args.Length)))
+                {
+                    try
+                    {
                             string clientVersion = reader.ReadString();
                             if (clientVersion.Length != 11)
                             {
@@ -216,155 +396,16 @@ namespace Crossplay
                             string targetVersion = _supportedVersions.ContainsKey(Main.curRelease) ? _supportedVersions[Main.curRelease] : $"Unknown(v{Main.curRelease})";
                             Log($"Changing version of index {args.Msg.whoAmI} from {_supportedVersions[versionNumber]} => {targetVersion}", color: ConsoleColor.Green);
 
+                            // Safety: Ensure we don't overwrite memory beyond the packet buffer
+                            if (connectRequest.Length > args.Length + 3)
+                            {
+                                Log($"[Crossplay] Error: Generated ConnectRequest ({connectRequest.Length} bytes) is larger than received buffer ({args.Length + 3} bytes).", color: ConsoleColor.Red);
+                                return;
+                            }
+
                             Buffer.BlockCopy(connectRequest, 0, args.Msg.readBuffer, args.Index - 3, connectRequest.Length);
-                        }
-                        break;
-                    case PacketTypes.PlayerInfo:
-                        {
-                            if (!Config.Settings.SupportJourneyClients)
-                            {
-                                return;
-                            }
-                            ref byte gameModeFlags = ref args.Msg.readBuffer[args.Length - 1];
-                            if (Main.GameMode == 3)
-                            {
-                                if ((gameModeFlags & 8) != 8)
-                                {
-                                    Log($"Enabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
-                                    gameModeFlags |= 8;
-                                    if (Main.ServerSideCharacter)
-                                    {
-                                        NetMessage.SendData(4, args.Msg.whoAmI, -1, null, args.Msg.whoAmI);
-                                    }
-                                }
-                                return;
-                            }
-                            if (TShock.Config.Settings.SoftcoreOnly && (gameModeFlags & 3) != 0)
-                            {
-                                return;
-                            }
-                            if ((gameModeFlags & 8) == 8)
-                            {
-                                Log($"Disabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
-                                gameModeFlags &= 247;
-                            }
-                        }
-                        break;
-                    case PacketTypes.NpcAddBuff:
-                        {
-                            try
-                            {
-                                short npcId = reader.ReadInt16();
-                                ushort buffType = reader.ReadUInt16();
-                                int buffTime = 0;
-
-                                if (args.Length >= 8)
-                                {
-                                    buffTime = reader.ReadInt32();
-                                }
-                                else if (args.Length >= 6)
-                                {
-                                    buffTime = reader.ReadInt16();
-                                }
-                                else
-                                {
-                                    return;
-                                }
-
-                                if (npcId >= 0 && npcId < Main.maxNPCs)
-                                {
-                                    if (Main.npc[npcId].active)
-                                    {
-                                        Main.npc[npcId].AddBuff(buffType, buffTime);
-                                        NetMessage.SendData((int)PacketTypes.NpcAddBuff, -1, args.Msg.whoAmI, null, npcId, buffType, buffTime);
-                                    }
-                                    args.Handled = true;
-                                }
-                            }
-                            catch
-                            {
-                            }
-                        }
-                        break;
-                    case PacketTypes.ProjectileNew:
-                        {
-                            try
-                            {
-                                short identity = reader.ReadInt16();
-                                float x = reader.ReadSingle();
-                                float y = reader.ReadSingle();
-                                float vx = reader.ReadSingle();
-                                float vy = reader.ReadSingle();
-                                byte owner = reader.ReadByte();
-                                short type = reader.ReadInt16();
-
-                                // Whitelist specific projectiles here (e.g., Harpoon = 33)
-                                if (Config.Settings.WhitelistedProjectiles.Contains(type))
-                                {
-                                    // Security: Prevent spawning projectiles for other players
-                                    if (owner != index) return;
-
-                                    if (!TShock.Players[index].HasPermission("crossplay.bypass"))
-                                    {
-                                        Log($"Player {TShock.Players[index].Name} tried to use bypassed projectile {type} without permission.", color: ConsoleColor.Yellow);
-                                        return;
-                                    }
-
-                                    BitsByte flags = reader.ReadByte();
-                                    float[] ai = new float[Projectile.maxAI];
-                                    if (flags[0]) ai[0] = reader.ReadSingle();
-                                    if (flags[1]) ai[1] = reader.ReadSingle();
-                                    if (flags[2]) ai[2] = reader.ReadSingle();
-
-                                    int projIndex = -1;
-                                    // Find existing projectile to update
-                                    for (int i = 0; i < Main.maxProjectiles; i++)
-                                    {
-                                        if (Main.projectile[i].active && Main.projectile[i].owner == owner && Main.projectile[i].identity == identity)
-                                        {
-                                            projIndex = i;
-                                            break;
-                                        }
-                                    }
-                                    // Or find a free slot
-                                    if (projIndex == -1)
-                                    {
-                                        for (int i = 0; i < Main.maxProjectiles; i++)
-                                        {
-                                            if (!Main.projectile[i].active)
-                                            {
-                                                projIndex = i;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if (projIndex == -1) projIndex = Projectile.FindOldestProjectile();
-
-                                    Projectile proj = Main.projectile[projIndex];
-                                    if (!proj.active || proj.type != type)
-                                    {
-                                        proj.SetDefaults(type);
-                                        proj.miscText = "";
-                                    }
-                                    proj.identity = identity;
-                                    proj.position = new Microsoft.Xna.Framework.Vector2(x, y);
-                                    proj.velocity = new Microsoft.Xna.Framework.Vector2(vx, vy);
-                                    proj.owner = owner;
-                                    proj.type = type;
-                                    if (flags[0]) proj.ai[0] = ai[0];
-                                    if (flags[1]) proj.ai[1] = ai[1];
-                                    if (flags[2]) proj.ai[2] = ai[2];
-                                    proj.active = true;
-
-                                    NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, index, null, projIndex);
-                                    args.Handled = true;
-                                }
-                            }
-                            catch
-                            {
-                            }
-                        }
-                        break;
+                    }
+                    catch { }
                 }
             }
         }

@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.6.1
+
+### Changed
+- Optimized packet handling to reduce CPU usage and rubber banding.
+- Further optimized `OnSendToClient` to reduce CPU usage when players are connected.
+- Replaced `MemoryMarshal` with `BitConverter` in `NetModuleHandler` for slight performance gain.
+- Fixed buffer overflow issues in connection handling.
+- Added Gemini attribution to README.
+
 ## v2.6
 
 ### Added
