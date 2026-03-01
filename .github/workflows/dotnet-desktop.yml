@@ -34,4 +34,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: Crossplay.dll
-        path: Crossplay/bin/Release/net6.0/Crossplay.dll
+        path: Crossplay/bin/Release/net9.0/Crossplay.dll
