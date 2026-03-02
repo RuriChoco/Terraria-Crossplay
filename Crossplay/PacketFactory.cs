@@ -1,9 +1,10 @@
-﻿using System.Text;
+﻿﻿using System.Text;
 using System.IO;
+using System;
 
 namespace Crossplay
 {
-    public class PacketFactory
+    public class PacketFactory : IDisposable
     {
         private MemoryStream memoryStream;
         public BinaryWriter writer;
@@ -114,6 +115,12 @@ namespace Crossplay
         public byte[] ToArray()
         {
             return memoryStream.ToArray();
+        }
+
+        public void Dispose()
+        {
+            writer?.Dispose();
+            memoryStream?.Dispose();
         }
     }
 }

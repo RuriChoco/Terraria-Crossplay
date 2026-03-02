@@ -46,6 +46,12 @@ namespace Crossplay
 
         public static string SavePath => Path.Combine(TShock.SavePath, "Crossplay.json");
 
+        private HashSet<int> _whitelistedProjectiles = new();
+
+        private byte[] _cachedVersionFixPacket;
+
+        private DateTime _lastItemCheck = DateTime.UtcNow;
+
         public readonly Dictionary<int, int> MaxItems = new()
         {
             { 312, 6100 },
@@ -70,46 +76,69 @@ namespace Crossplay
                 Console.WriteLine($"[Crossplay] Warning: Server version {Main.curRelease} is not explicitly supported. Plugin loading anyway.");
             }
 
-            On.Terraria.Net.NetManager.Broadcast_NetPacket_int += NetModuleHandler.OnBroadcast;
-            On.Terraria.Net.NetManager.SendToClient += NetModuleHandler.OnSendToClient;
+            try
+            {
+                On.Terraria.Net.NetManager.Broadcast_NetPacket_int += NetModuleHandler.OnBroadcast;
+                On.Terraria.Net.NetManager.SendToClient += NetModuleHandler.OnSendToClient;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Crossplay] Warning: Failed to register NetManager hooks. Creative item filtering will be disabled. Error: {ex.Message}");
+                if (ex.Message.Contains("clrjit"))
+                {
+                    Console.WriteLine("[Crossplay] Fix: On Linux/macOS, launch the server using: DOTNET_ROLL_FORWARD=Major dotnet TShock.Server.dll");
+                }
+            }
 
             ServerApi.Hooks.GameInitialize.Register(this, OnInitialize);
             ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
             ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MaxValue);
             ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
+            ServerApi.Hooks.NetSendData.Register(this, OnSendData);
+            ServerApi.Hooks.GameUpdate.Register(this, OnGameUpdate);
 
             GeneralHooks.ReloadEvent += OnReload;
             Commands.ChatCommands.Add(new Command("crossplay.settings", CrossplayCommand, "crossplay"));
+
+            // Pre-generate the version fix packet since Main.curRelease is constant
+            using (var factory = new PacketFactory())
+            {
+                _cachedVersionFixPacket = factory
+                    .SetType(1)
+                    .PackString($"Terraria{Main.curRelease}")
+                    .GetByteData();
+            }
         }
 
         private void OnInitialize(EventArgs args)
         {
-            if (!File.Exists(TShock.SavePath))
+            if (!Directory.Exists(TShock.SavePath))
             {
                 Directory.CreateDirectory(TShock.SavePath);
             }
-            bool writeConfig = true;
-            if (File.Exists(SavePath))
-            {
-                Config.Read(SavePath, out writeConfig);
-            }
-            if (writeConfig)
-            {
-                Config.Write(SavePath);
-            }
+            ReloadConfig();
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                On.Terraria.Net.NetManager.Broadcast_NetPacket_int -= NetModuleHandler.OnBroadcast;
-                On.Terraria.Net.NetManager.SendToClient -= NetModuleHandler.OnSendToClient;
+                try
+                {
+                    On.Terraria.Net.NetManager.Broadcast_NetPacket_int -= NetModuleHandler.OnBroadcast;
+                    On.Terraria.Net.NetManager.SendToClient -= NetModuleHandler.OnSendToClient;
+                }
+                catch
+                {
+                    // Ignore errors if hooks were not registered
+                }
 
                 ServerApi.Hooks.GameInitialize.Deregister(this, OnInitialize);
                 ServerApi.Hooks.GamePostInitialize.Deregister(this, OnPostInitialize);
                 ServerApi.Hooks.NetGetData.Deregister(this, OnGetData);
                 ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
+                ServerApi.Hooks.NetSendData.Deregister(this, OnSendData);
+                ServerApi.Hooks.GameUpdate.Deregister(this, OnGameUpdate);
 
                 GeneralHooks.ReloadEvent -= OnReload;
             }
@@ -118,6 +147,42 @@ namespace Crossplay
 
         private void OnReload(ReloadEventArgs args)
         {
+            ReloadConfig();
+        }
+
+        private void CrossplayCommand(CommandArgs args)
+        {
+            if (args.Parameters.Count > 0)
+            {
+                string subCommand = args.Parameters[0].ToLower();
+                if (subCommand == "reload")
+                {
+                    ReloadConfig();
+                    args.Player.SendSuccessMessage("[Crossplay] Configuration reloaded successfully.");
+                    return;
+                }
+                if (subCommand == "clear")
+                {
+                    int count = 0;
+                    for (int i = 0; i < Main.maxItems; i++)
+                    {
+                        dynamic item = Main.item[i];
+                        if (item.active)
+                        {
+                            item.SetDefaults(0);
+                            NetMessage.SendData((int)PacketTypes.UpdateItemDrop, -1, -1, null, i);
+                            count++;
+                        }
+                    }
+                    args.Player.SendSuccessMessage($"[Crossplay] Cleared {count} dropped items.");
+                    return;
+                }
+            }
+            args.Player.SendErrorMessage("Usage: /crossplay <reload|clear>");
+        }
+
+        private void ReloadConfig()
+        {
             bool writeConfig = true;
             if (File.Exists(SavePath))
             {
@@ -127,25 +192,7 @@ namespace Crossplay
             {
                 Config.Write(SavePath);
             }
-        }
-
-        private void CrossplayCommand(CommandArgs args)
-        {
-            if (args.Parameters.Count > 0 && args.Parameters[0].ToLower() == "reload")
-            {
-                bool writeConfig = true;
-                if (File.Exists(SavePath))
-                {
-                    Config.Read(SavePath, out writeConfig);
-                }
-                if (writeConfig)
-                {
-                    Config.Write(SavePath);
-                }
-                args.Player.SendSuccessMessage("[Crossplay] Configuration reloaded successfully.");
-                return;
-            }
-            args.Player.SendErrorMessage("Usage: /crossplay reload");
+            _whitelistedProjectiles = new HashSet<int>(Config.Settings.WhitelistedProjectiles);
         }
 
         private void OnPostInitialize(EventArgs e)
@@ -217,7 +264,7 @@ namespace Crossplay
                 }
 
                 // Whitelist specific projectiles here (e.g., Harpoon = 33)
-                if (Config.Settings.WhitelistedProjectiles.Contains(type))
+                if (_whitelistedProjectiles.Contains(type))
                 {
                     byte owner = args.Msg.readBuffer[args.Index + 18];
 
@@ -245,12 +292,12 @@ namespace Crossplay
                     if ((flags & 4) == 4) requiredLength += 4;
                     if (args.Length < requiredLength) return;
 
-                    float[] ai = new float[Projectile.maxAI];
+                    float ai0 = 0, ai1 = 0, ai2 = 0;
                     int offset = args.Index + 22;
 
-                    if ((flags & 1) == 1) { ai[0] = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
-                    if ((flags & 2) == 2) { ai[1] = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
-                    if ((flags & 4) == 4) { ai[2] = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+                    if ((flags & 1) == 1) { ai0 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+                    if ((flags & 2) == 2) { ai1 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+                    if ((flags & 4) == 4) { ai2 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
 
                     int projIndex = -1;
                     // Find existing projectile to update
@@ -287,9 +334,9 @@ namespace Crossplay
                     proj.velocity = new Microsoft.Xna.Framework.Vector2(vx, vy);
                     proj.owner = owner;
                     proj.type = type;
-                    if ((flags & 1) == 1) proj.ai[0] = ai[0];
-                    if ((flags & 2) == 2) proj.ai[1] = ai[1];
-                    if ((flags & 4) == 4) proj.ai[2] = ai[2];
+                    if ((flags & 1) == 1) proj.ai[0] = ai0;
+                    if ((flags & 2) == 2) proj.ai[1] = ai1;
+                    if ((flags & 4) == 4) proj.ai[2] = ai2;
                     proj.active = true;
 
                     NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, index, null, projIndex);
@@ -360,11 +407,14 @@ namespace Crossplay
 
             if (args.MsgID == PacketTypes.ConnectRequest)
             {
-                using (var reader = new BinaryReader(new MemoryStream(args.Msg.readBuffer, args.Index, args.Length)))
-                {
                     try
                     {
-                            string clientVersion = reader.ReadString();
+                            // Optimization: Read string manually to avoid BinaryReader/MemoryStream allocation
+                            // Version string is short ("Terraria" + version), so length is always 1 byte (< 128)
+                            int strLen = args.Msg.readBuffer[args.Index];
+                            if (strLen >= 128) return;
+
+                            string clientVersion = Encoding.UTF8.GetString(args.Msg.readBuffer, args.Index + 1, strLen);
                             if (clientVersion.Length != 11)
                             {
                                 args.Handled = true;
@@ -389,23 +439,177 @@ namespace Crossplay
                                 Log($"Warning: Version {_supportedVersions[versionNumber]} ({versionNumber}) is missing from MaxItems. Item filtering disabled for index {index}.", color: ConsoleColor.Yellow);
                             }
                             NetMessage.SendData(9, args.Msg.whoAmI, -1, NetworkText.FromLiteral("Fixing Version..."), 1);
-                            byte[] connectRequest = new PacketFactory()
-                                .SetType(1)
-                                .PackString($"Terraria{Main.curRelease}")
-                                .GetByteData();
                             string targetVersion = _supportedVersions.ContainsKey(Main.curRelease) ? _supportedVersions[Main.curRelease] : $"Unknown(v{Main.curRelease})";
                             Log($"Changing version of index {args.Msg.whoAmI} from {_supportedVersions[versionNumber]} => {targetVersion}", color: ConsoleColor.Green);
 
                             // Safety: Ensure we don't overwrite memory beyond the packet buffer
-                            if (connectRequest.Length > args.Length + 3)
+                            if (_cachedVersionFixPacket.Length > args.Length + 3)
                             {
-                                Log($"[Crossplay] Error: Generated ConnectRequest ({connectRequest.Length} bytes) is larger than received buffer ({args.Length + 3} bytes).", color: ConsoleColor.Red);
+                                Log($"[Crossplay] Error: Generated ConnectRequest ({_cachedVersionFixPacket.Length} bytes) is larger than received buffer ({args.Length + 3} bytes).", color: ConsoleColor.Red);
                                 return;
                             }
 
-                            Buffer.BlockCopy(connectRequest, 0, args.Msg.readBuffer, args.Index - 3, connectRequest.Length);
+                            Buffer.BlockCopy(_cachedVersionFixPacket, 0, args.Msg.readBuffer, args.Index - 3, _cachedVersionFixPacket.Length);
                     }
                     catch { }
+            }
+        }
+
+        private void OnSendData(SendDataEventArgs args)
+        {
+            if (args.Handled) return;
+
+            if (args.MsgId == PacketTypes.UpdateItemDrop)
+            {
+                int itemIdx = args.number;
+                if (itemIdx < 0 || itemIdx >= Main.maxItems) return;
+
+                dynamic item = Main.item[itemIdx];
+                if (item.type == 0) return; // Air is always fine
+
+                if (args.remoteClient != -1)
+                {
+                    if (ShouldFilterItem(item.type, args.remoteClient))
+                    {
+                        args.Handled = true;
+                        SendEmptyItem(args.MsgId, itemIdx, args.remoteClient);
+                    }
+                }
+                else
+                {
+                    // Broadcast: Check if ANY connected client needs filtering
+                    bool needsFiltering = false;
+                    for (int i = 0; i < Main.maxPlayers; i++)
+                    {
+                        if (TShock.Players[i] != null && TShock.Players[i].Active && i != args.ignoreClient)
+                        {
+                            if (ShouldFilterItem(item.type, i))
+                            {
+                                needsFiltering = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (needsFiltering)
+                    {
+                        args.Handled = true;
+                        // Re-broadcast manually
+                        for (int i = 0; i < Main.maxPlayers; i++)
+                        {
+                            if (TShock.Players[i] == null || !TShock.Players[i].Active || i == args.ignoreClient) continue;
+
+                            if (ShouldFilterItem(item.type, i))
+                            {
+                                SendEmptyItem(args.MsgId, itemIdx, i);
+                            }
+                            else
+                            {
+                                // Send original packet
+                                using (var factory = new PacketFactory())
+                                {
+                                    byte[] packet = factory
+                                        .SetType((short)args.MsgId)
+                                        .PackInt16((short)itemIdx)
+                                        .PackSingle(item.position.X)
+                                        .PackSingle(item.position.Y)
+                                        .PackSingle(item.velocity.X)
+                                        .PackSingle(item.velocity.Y)
+                                        .PackInt16((short)item.stack)
+                                        .PackByte(item.prefix)
+                                        .PackByte((byte)(args.number2 == 1f ? 1 : 0))
+                                        .PackInt16((short)item.netID)
+                                        .GetByteData();
+                                    TShock.Players[i].SendRawData(packet);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void SendEmptyItem(PacketTypes msgId, int itemIdx, int playerIndex)
+        {
+            using (var factory = new PacketFactory())
+            {
+                byte[] packet = factory
+                    .SetType((short)msgId)
+                    .PackInt16((short)itemIdx)
+                    .PackSingle(0).PackSingle(0).PackSingle(0).PackSingle(0) // Pos/Vel
+                    .PackInt16(0) // Stack
+                    .PackByte(0)  // Prefix
+                    .PackByte(0)  // NoDelay
+                    .PackInt16(0) // NetID
+                    .GetByteData();
+                TShock.Players[playerIndex].SendRawData(packet);
+            }
+        }
+
+        private bool ShouldFilterItem(int netID, int playerIndex)
+        {
+            int version = ClientVersions[playerIndex];
+            if (version == 0 || version == -1) return false; // Unknown or same version
+            
+            if (MaxItems.TryGetValue(version, out int maxItem))
+            {
+                return netID > maxItem;
+            }
+            return false;
+        }
+
+        private void OnGameUpdate(EventArgs args)
+        {
+            if (!Config.Settings.EnableItemLimits) return;
+
+            if ((DateTime.UtcNow - _lastItemCheck).TotalSeconds < 1) return;
+            _lastItemCheck = DateTime.UtcNow;
+
+            int activeItemCount = 0;
+            int maxItems = Config.Settings.MaxDroppedItems;
+            int maxTime = Config.Settings.ItemDespawnSeconds * 60;
+
+            // First pass: Despawn old items and count
+            for (int i = 0; i < Main.maxItems; i++)
+            {
+                dynamic item = Main.item[i];
+                if (item.active)
+                {
+                    // Check despawn time
+                    if (item.time >= maxTime)
+                    {
+                        item.SetDefaults(0);
+                        NetMessage.SendData((int)PacketTypes.UpdateItemDrop, -1, -1, null, i);
+                    }
+                    else
+                    {
+                        activeItemCount++;
+                    }
+                }
+            }
+
+            // Second pass: Enforce max limit if exceeded
+            if (activeItemCount > maxItems)
+            {
+                // Find items to remove (oldest first)
+                var activeIndices = new List<int>();
+                for (int i = 0; i < Main.maxItems; i++)
+                {
+                    if (((dynamic)Main.item[i]).active)
+                    {
+                        activeIndices.Add(i);
+                    }
+                }
+
+                activeIndices.Sort((a, b) => ((dynamic)Main.item[b]).time.CompareTo(((dynamic)Main.item[a]).time));
+
+                int toRemove = activeItemCount - maxItems;
+                for (int i = 0; i < toRemove; i++)
+                {
+                    int idx = activeIndices[i];
+                    dynamic item = Main.item[idx];
+                    item.SetDefaults(0);
+                    NetMessage.SendData((int)PacketTypes.UpdateItemDrop, -1, -1, null, idx);
                 }
             }
         }
