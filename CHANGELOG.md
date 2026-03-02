@@ -7,6 +7,9 @@
 - Further optimized `OnSendToClient` to reduce CPU usage when players are connected.
 - Replaced `MemoryMarshal` with `BitConverter` in `NetModuleHandler` for slight performance gain.
 - Fixed buffer overflow issues in connection handling.
+- Fixed "ghost items" and pickup issues for mobile players by filtering unsupported item drops.
+- Added Item Limiter to reduce server lag (configurable max items and despawn time).
+- Added `/crossplay clear` command to manually remove all dropped items.
 - Added Gemini attribution to README.
 
 ## v2.6

@@ -22,6 +22,13 @@ It also includes built-in fixes for common anti-cheat (Bouncer) false positives 
 ## Installation
 Installation is very easy; Simply insert the plugin file (`Crossplay.dll`) into the `ServerPlugins` folder of your TShock install.
 
+### Linux / macOS Users
+If you see a `Could not locate clrjit library` error, you must launch the server using the system .NET runtime instead of the standalone executable. Run this command in your server folder:
+
+```bash
+DOTNET_ROLL_FORWARD=Major dotnet TShock.Server.dll
+```
+
 ## Configuration
 The plugin creates a `Crossplay.json` file in your `tshock` folder.
 
