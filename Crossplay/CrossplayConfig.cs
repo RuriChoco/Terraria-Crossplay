@@ -23,9 +23,22 @@ namespace Crossplay
 
         [JsonProperty("item_despawn_seconds")]
         public int ItemDespawnSeconds = 180;
+
+        [JsonProperty("enable_version_check_command")]
+        public bool EnableVersionCheckCommand { get; set; } = true;
+
+        [JsonProperty("show_startup_banner")]
+        public bool ShowStartupBanner { get; set; } = true;
+
+        [JsonProperty("enable_npc_buff_fix")]
+        public bool EnableNpcBuffFix { get; set; } = true;
     }
 
     public class CrossplayConfig : ConfigFile<CrossplaySettings>
     {
+        public void Reset()
+        {
+            Settings = new CrossplaySettings();
+        }
     }
 }

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Runtime.CompilerServices;
 
+using System.Runtime.InteropServices;
 using Terraria;
 using Terraria.ID;
 using Terraria.Localization;
@@ -52,6 +53,36 @@ namespace Crossplay
 
         private DateTime _lastItemCheck = DateTime.UtcNow;
 
+        private readonly List<(int index, int time)> _survivingItemsCache = new();
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private readonly struct ProjectilePacketCore
+        {
+            public readonly short Identity;
+            public readonly float X;
+            public readonly float Y;
+            public readonly float VX;
+            public readonly float VY;
+            public readonly byte Owner;
+            public readonly short Type;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private readonly struct NpcAddBuffPacketSmall
+        {
+            public readonly short NpcId;
+            public readonly ushort BuffType;
+            public readonly short BuffTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private readonly struct NpcAddBuffPacketLarge
+        {
+            public readonly short NpcId;
+            public readonly ushort BuffType;
+            public readonly int BuffTime;
+        }
+
         public readonly Dictionary<int, int> MaxItems = new()
         {
             { 312, 6100 },
@@ -94,11 +125,10 @@ namespace Crossplay
             ServerApi.Hooks.GamePostInitialize.Register(this, OnPostInitialize);
             ServerApi.Hooks.NetGetData.Register(this, OnGetData, int.MaxValue);
             ServerApi.Hooks.ServerLeave.Register(this, OnLeave);
-            ServerApi.Hooks.NetSendData.Register(this, OnSendData);
             ServerApi.Hooks.GameUpdate.Register(this, OnGameUpdate);
 
             GeneralHooks.ReloadEvent += OnReload;
-            Commands.ChatCommands.Add(new Command("crossplay.settings", CrossplayCommand, "crossplay"));
+            Commands.ChatCommands.Add(new Command(new List<string> { "crossplay.settings", "crossplay.clear", "crossplay.check" }, CrossplayCommand, "crossplay"));
 
             // Pre-generate the version fix packet since Main.curRelease is constant
             using (var factory = new PacketFactory())
@@ -137,7 +167,6 @@ namespace Crossplay
                 ServerApi.Hooks.GamePostInitialize.Deregister(this, OnPostInitialize);
                 ServerApi.Hooks.NetGetData.Deregister(this, OnGetData);
                 ServerApi.Hooks.ServerLeave.Deregister(this, OnLeave);
-                ServerApi.Hooks.NetSendData.Deregister(this, OnSendData);
                 ServerApi.Hooks.GameUpdate.Deregister(this, OnGameUpdate);
 
                 GeneralHooks.ReloadEvent -= OnReload;
@@ -157,12 +186,28 @@ namespace Crossplay
                 string subCommand = args.Parameters[0].ToLower();
                 if (subCommand == "reload")
                 {
-                    ReloadConfig();
-                    args.Player.SendSuccessMessage("[Crossplay] Configuration reloaded successfully.");
+                    if (!args.Player.HasPermission("crossplay.settings"))
+                    {
+                        args.Player.SendErrorMessage("You do not have permission to reload the configuration.");
+                        return;
+                    }
+                    if (ReloadConfig())
+                    {
+                        args.Player.SendSuccessMessage("[Crossplay] Configuration reloaded successfully.");
+                    }
+                    else
+                    {
+                        args.Player.SendErrorMessage("[Crossplay] Failed to reload configuration. Check logs for details.");
+                    }
                     return;
                 }
                 if (subCommand == "clear")
                 {
+                    if (!args.Player.HasPermission("crossplay.clear"))
+                    {
+                        args.Player.SendErrorMessage("You do not have permission to clear dropped items.");
+                        return;
+                    }
                     int count = 0;
                     for (int i = 0; i < Main.maxItems; i++)
                     {
@@ -177,26 +222,122 @@ namespace Crossplay
                     args.Player.SendSuccessMessage($"[Crossplay] Cleared {count} dropped items.");
                     return;
                 }
+                if (subCommand == "version" || subCommand == "check")
+                {
+                    if (!Config.Settings.EnableVersionCheckCommand)
+                    {
+                        args.Player.SendErrorMessage("The version check command is disabled.");
+                        return;
+                    }
+                    if (!args.Player.HasPermission("crossplay.check"))
+                    {
+                        args.Player.SendErrorMessage("You do not have permission to check player versions.");
+                        return;
+                    }
+                    if (args.Parameters.Count < 2)
+                    {
+                        args.Player.SendErrorMessage("Usage: /crossplay version <player>");
+                        return;
+                    }
+                    string targetName = string.Join(" ", args.Parameters.Skip(1));
+                    var players = TSPlayer.FindByNameOrID(targetName);
+                    if (players.Count == 0)
+                    {
+                        args.Player.SendErrorMessage("No players matched.");
+                        return;
+                    }
+                    if (players.Count > 1)
+                    {
+                        args.Player.SendMultipleMatchError(players.Select(p => p.Name));
+                        return;
+                    }
+
+                    var target = players[0];
+                    if (target.Index < 0 || target.Index >= ClientVersions.Length)
+                    {
+                        args.Player.SendErrorMessage("Player index out of bounds.");
+                        return;
+                    }
+                    int version = ClientVersions[target.Index];
+                    string versionString = _supportedVersions.TryGetValue(version, out string label) ? $"{label} ({version})" : $"Unknown ({version})";
+                    if (version == -1) versionString = $"Native ({Main.curRelease})";
+
+                    args.Player.SendSuccessMessage($"[Crossplay] {target.Name} is on version: {versionString}");
+                    return;
+                }
+                if (subCommand == "status")
+                {
+                    if (!args.Player.HasPermission("crossplay.settings"))
+                    {
+                        args.Player.SendErrorMessage("You do not have permission to view crossplay status.");
+                        return;
+                    }
+                    args.Player.SendSuccessMessage("[Crossplay] Current Status:");
+                    args.Player.SendInfoMessage($"Journey Support: {(Config.Settings.SupportJourneyClients ? "Enabled" : "Disabled")}");
+                    args.Player.SendInfoMessage($"Item Limiter: {(Config.Settings.EnableItemLimits ? "Enabled" : "Disabled")}");
+                    if (Config.Settings.EnableItemLimits)
+                    {
+                        args.Player.SendInfoMessage($" - Max Items: {Config.Settings.MaxDroppedItems}");
+                        args.Player.SendInfoMessage($" - Despawn Time: {Config.Settings.ItemDespawnSeconds}s");
+                    }
+                    args.Player.SendInfoMessage($"Version Check Cmd: {(Config.Settings.EnableVersionCheckCommand ? "Enabled" : "Disabled")}");
+                    args.Player.SendInfoMessage($"Debug Mode: {(Config.Settings.DebugMode ? "Enabled" : "Disabled")}");
+                    return;
+                }
+                if (subCommand == "resetconfig")
+                {
+                    if (!args.Player.HasPermission("crossplay.settings"))
+                    {
+                        args.Player.SendErrorMessage("You do not have permission to reset the configuration.");
+                        return;
+                    }
+                    try
+                    {
+                        Config.Reset();
+                        Config.Write(SavePath);
+                        _whitelistedProjectiles = new HashSet<int>(Config.Settings.WhitelistedProjectiles);
+                        args.Player.SendSuccessMessage("[Crossplay] Configuration has been reset to default values and reloaded.");
+                        Log("Configuration has been reset to default values.", false, ConsoleColor.Yellow);
+                    }
+                    catch (Exception ex)
+                    {
+                        args.Player.SendErrorMessage("[Crossplay] An error occurred while resetting the configuration. Check logs for details.");
+                        Log($"Failed to reset configuration: {ex.Message}", false, ConsoleColor.Red);
+                    }
+                    return;
+                }
             }
-            args.Player.SendErrorMessage("Usage: /crossplay <reload|clear>");
+            args.Player.SendErrorMessage("Usage: /crossplay <reload|clear|version|status|resetconfig>");
         }
 
-        private void ReloadConfig()
+        private bool ReloadConfig()
         {
-            bool writeConfig = true;
-            if (File.Exists(SavePath))
+            try
             {
-                Config.Read(SavePath, out writeConfig);
+                bool writeConfig = true;
+                if (File.Exists(SavePath))
+                {
+                    Config.Read(SavePath, out writeConfig);
+                }
+                if (writeConfig)
+                {
+                    Config.Write(SavePath);
+                }
+                _whitelistedProjectiles = new HashSet<int>(Config.Settings.WhitelistedProjectiles);
+                Log("Configuration reloaded from disk.", false, ConsoleColor.Green);
+                return true;
             }
-            if (writeConfig)
+            catch (Exception ex)
             {
-                Config.Write(SavePath);
+                Log($"Failed to reload configuration: {ex.Message}", false, ConsoleColor.Red);
+                return false;
             }
-            _whitelistedProjectiles = new HashSet<int>(Config.Settings.WhitelistedProjectiles);
         }
 
         private void OnPostInitialize(EventArgs e)
         {
+            if (!Config.Settings.ShowStartupBanner) return;
+
             StringBuilder sb = new StringBuilder()
                 .Append("Crossplay has been enabled & has whitelisted the following versions:\n")
                 .Append(string.Join(", ", _supportedVersions.Values))
@@ -222,340 +363,243 @@ namespace Crossplay
         {
             int index = args.Msg.whoAmI;
 
-            // Optimization: Skip unnecessary allocations for unhandled packets
-            if (args.MsgID != PacketTypes.ConnectRequest &&
-                args.MsgID != PacketTypes.PlayerInfo &&
-                args.MsgID != PacketTypes.NpcAddBuff &&
-                args.MsgID != PacketTypes.ProjectileNew)
-            {
-                return;
-            }
-
             // Optimization: Ignore packets from unknown clients (except ConnectRequest)
             if (ClientVersions[index] == 0 && args.MsgID != PacketTypes.ConnectRequest)
             {
                 return;
             }
 
-            // Optimization: Handle ProjectileNew without allocations
-            if (args.MsgID == PacketTypes.ProjectileNew)
+            switch (args.MsgID)
             {
-                // Identity(2) + X(4) + Y(4) + VX(4) + VY(4) + Owner(1) = 19 bytes offset
-                if (args.Length < 22) return;
-
-                short type = BitConverter.ToInt16(args.Msg.readBuffer, args.Index + 19);
-
-                if (Config.Settings.DebugMode)
-                {
-                    using (var debugReader = new BinaryReader(new MemoryStream(args.Msg.readBuffer, args.Index, args.Length)))
+                case PacketTypes.ProjectileNew:
+                    HandleProjectileNew(args);
+                    break;
+                case PacketTypes.NpcAddBuff:
+                    if (Config.Settings.EnableNpcBuffFix)
                     {
-                        debugReader.ReadInt16(); // Identity
-                        debugReader.ReadSingle(); // X
-                        debugReader.ReadSingle(); // Y
-                        debugReader.ReadSingle(); // VX
-                        debugReader.ReadSingle(); // VY
-                        debugReader.ReadByte();   // Owner
-                        short debugType = debugReader.ReadInt16();
-                        if (debugType != type)
-                        {
-                            Log($"[OFFSET ERROR] BitConverter read {type}, BinaryReader read {debugType}", true, ConsoleColor.Red);
-                        }
+                        HandleNpcAddBuff(args);
+                    }
+                    break;
+                case PacketTypes.PlayerInfo:
+                    HandlePlayerInfo(args);
+                    break;
+                case PacketTypes.ConnectRequest:
+                    HandleConnectRequest(args);
+                    break;
+            }
+        }
+
+        private void HandleProjectileNew(GetDataEventArgs args)
+        {
+            int index = args.Msg.whoAmI;
+            // Core packet data is 21 bytes, plus 1 for flags.
+            if (args.Length < 22) return;
+
+            var coreData = MemoryMarshal.Read<ProjectilePacketCore>(args.Msg.readBuffer.AsSpan(args.Index));
+
+            if (Config.Settings.DebugMode) // Keep debug logic for validation
+            {
+                using (var debugReader = new BinaryReader(new MemoryStream(args.Msg.readBuffer, args.Index, args.Length)))
+                {
+                    debugReader.ReadInt16(); // Identity
+                    debugReader.ReadSingle(); // X
+                    debugReader.ReadSingle(); // Y
+                    debugReader.ReadSingle(); // VX
+                    debugReader.ReadSingle(); // VY
+                    debugReader.ReadByte();   // Owner
+                    short debugType = debugReader.ReadInt16();
+                    if (debugType != coreData.Type)
+                    {
+                        Log($"[OFFSET ERROR] MemoryMarshal read {coreData.Type}, BinaryReader read {debugType}", true, ConsoleColor.Red);
                     }
                 }
+            }
 
-                // Whitelist specific projectiles here (e.g., Harpoon = 33)
-                if (_whitelistedProjectiles.Contains(type))
+            // Whitelist specific projectiles here (e.g., Harpoon = 33)
+            if (_whitelistedProjectiles.Contains(coreData.Type))
+            {
+                // Security: Prevent spawning projectiles for other players
+                if (coreData.Owner != index) return;
+
+                if (!TShock.Players[index].HasPermission("crossplay.bypass"))
                 {
-                    byte owner = args.Msg.readBuffer[args.Index + 18];
+                    Log($"Player {TShock.Players[index].Name} tried to use bypassed projectile {coreData.Type} without permission.", color: ConsoleColor.Yellow);
+                    return;
+                }
 
-                    // Security: Prevent spawning projectiles for other players
-                    if (owner != index) return;
+                byte flags = args.Msg.readBuffer[args.Index + 21];
 
-                    if (!TShock.Players[index].HasPermission("crossplay.bypass"))
+                // Validation: Ensure packet is large enough for the flags
+                int requiredLength = 22;
+                if ((flags & 1) == 1) requiredLength += 4; // ai[0]
+                if ((flags & 2) == 2) requiredLength += 4; // ai[1]
+                if ((flags & 4) == 4) requiredLength += 4; // ai[2]
+                if (args.Length < requiredLength) return;
+
+                float ai0 = 0, ai1 = 0, ai2 = 0;
+                int offset = args.Index + 22;
+
+                if ((flags & 1) == 1) { ai0 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+                if ((flags & 2) == 2) { ai1 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+                if ((flags & 4) == 4) { ai2 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
+
+                int projIndex = -1;
+                // Find existing projectile to update
+                for (int i = 0; i < Main.maxProjectiles; i++)
+                {
+                    if (Main.projectile[i].active && Main.projectile[i].owner == coreData.Owner && Main.projectile[i].identity == coreData.Identity)
                     {
-                        Log($"Player {TShock.Players[index].Name} tried to use bypassed projectile {type} without permission.", color: ConsoleColor.Yellow);
-                        return;
+                        projIndex = i;
+                        break;
                     }
-
-                    short identity = BitConverter.ToInt16(args.Msg.readBuffer, args.Index);
-                    float x = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 2);
-                    float y = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 6);
-                    float vx = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 10);
-                    float vy = BitConverter.ToSingle(args.Msg.readBuffer, args.Index + 14);
-
-                    byte flags = args.Msg.readBuffer[args.Index + 21];
-
-                    // Validation: Ensure packet is large enough for the flags
-                    int requiredLength = 22;
-                    if ((flags & 1) == 1) requiredLength += 4;
-                    if ((flags & 2) == 2) requiredLength += 4;
-                    if ((flags & 4) == 4) requiredLength += 4;
-                    if (args.Length < requiredLength) return;
-
-                    float ai0 = 0, ai1 = 0, ai2 = 0;
-                    int offset = args.Index + 22;
-
-                    if ((flags & 1) == 1) { ai0 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
-                    if ((flags & 2) == 2) { ai1 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
-                    if ((flags & 4) == 4) { ai2 = BitConverter.ToSingle(args.Msg.readBuffer, offset); offset += 4; }
-
-                    int projIndex = -1;
-                    // Find existing projectile to update
+                }
+                // Or find a free slot
+                if (projIndex == -1)
+                {
                     for (int i = 0; i < Main.maxProjectiles; i++)
                     {
-                        if (Main.projectile[i].active && Main.projectile[i].owner == owner && Main.projectile[i].identity == identity)
+                        if (!Main.projectile[i].active)
                         {
                             projIndex = i;
                             break;
                         }
                     }
-                    // Or find a free slot
-                    if (projIndex == -1)
-                    {
-                        for (int i = 0; i < Main.maxProjectiles; i++)
-                        {
-                            if (!Main.projectile[i].active)
-                            {
-                                projIndex = i;
-                                break;
-                            }
-                        }
-                    }
-                    if (projIndex == -1) projIndex = Projectile.FindOldestProjectile();
-
-                    Projectile proj = Main.projectile[projIndex];
-                    if (!proj.active || proj.type != type)
-                    {
-                        proj.SetDefaults(type);
-                        proj.miscText = "";
-                    }
-                    proj.identity = identity;
-                    proj.position = new Microsoft.Xna.Framework.Vector2(x, y);
-                    proj.velocity = new Microsoft.Xna.Framework.Vector2(vx, vy);
-                    proj.owner = owner;
-                    proj.type = type;
-                    if ((flags & 1) == 1) proj.ai[0] = ai0;
-                    if ((flags & 2) == 2) proj.ai[1] = ai1;
-                    if ((flags & 4) == 4) proj.ai[2] = ai2;
-                    proj.active = true;
-
-                    NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, index, null, projIndex);
-                    args.Handled = true;
                 }
-                return;
-            }
+                if (projIndex == -1) projIndex = Projectile.FindOldestProjectile();
 
-            // Optimization: Handle NpcAddBuff without allocations
-            if (args.MsgID == PacketTypes.NpcAddBuff)
-            {
-                if (args.Length < 6) return;
-
-                short npcId = BitConverter.ToInt16(args.Msg.readBuffer, args.Index);
-                ushort buffType = BitConverter.ToUInt16(args.Msg.readBuffer, args.Index + 2);
-                int buffTime;
-
-                if (args.Length >= 8)
-                    buffTime = BitConverter.ToInt32(args.Msg.readBuffer, args.Index + 4);
-                else
-                    buffTime = BitConverter.ToInt16(args.Msg.readBuffer, args.Index + 4);
-
-                if (npcId >= 0 && npcId < Main.maxNPCs)
+                Projectile proj = Main.projectile[projIndex];
+                if (!proj.active || proj.type != coreData.Type)
                 {
-                    if (Main.npc[npcId].active)
-                    {
-                        Main.npc[npcId].AddBuff(buffType, buffTime);
-                        NetMessage.SendData((int)PacketTypes.NpcAddBuff, -1, args.Msg.whoAmI, null, npcId, buffType, buffTime);
-                    }
-                    args.Handled = true;
+                    proj.SetDefaults(coreData.Type);
+                    proj.miscText = "";
                 }
-                return;
-            }
+                proj.identity = coreData.Identity;
+                proj.position = new Microsoft.Xna.Framework.Vector2(coreData.X, coreData.Y);
+                proj.velocity = new Microsoft.Xna.Framework.Vector2(coreData.VX, coreData.VY);
+                proj.owner = coreData.Owner;
+                proj.type = coreData.Type;
+                if ((flags & 1) == 1) proj.ai[0] = ai0;
+                if ((flags & 2) == 2) proj.ai[1] = ai1;
+                if ((flags & 4) == 4) proj.ai[2] = ai2;
+                proj.active = true;
 
-            // Optimization: Handle PlayerInfo without allocations
-            if (args.MsgID == PacketTypes.PlayerInfo)
-            {
-                if (!Config.Settings.SupportJourneyClients)
-                {
-                    return;
-                }
-                if (args.Length < 1) return;
-                ref byte gameModeFlags = ref args.Msg.readBuffer[args.Index + args.Length - 1];
-                if (Main.GameMode == 3)
-                {
-                    if ((gameModeFlags & 8) != 8)
-                    {
-                        Log($"Enabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
-                        gameModeFlags |= 8;
-                        if (Main.ServerSideCharacter)
-                        {
-                            NetMessage.SendData(4, args.Msg.whoAmI, -1, null, args.Msg.whoAmI);
-                        }
-                    }
-                    return;
-                }
-                if (TShock.Config.Settings.SoftcoreOnly && (gameModeFlags & 3) != 0)
-                {
-                    return;
-                }
-                if ((gameModeFlags & 8) == 8)
-                {
-                    Log($"Disabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
-                    gameModeFlags &= 247;
-                }
-                return;
-            }
-
-            if (args.MsgID == PacketTypes.ConnectRequest)
-            {
-                    try
-                    {
-                            // Optimization: Read string manually to avoid BinaryReader/MemoryStream allocation
-                            // Version string is short ("Terraria" + version), so length is always 1 byte (< 128)
-                            int strLen = args.Msg.readBuffer[args.Index];
-                            if (strLen >= 128) return;
-
-                            string clientVersion = Encoding.UTF8.GetString(args.Msg.readBuffer, args.Index + 1, strLen);
-                            if (clientVersion.Length != 11)
-                            {
-                                args.Handled = true;
-                                return;
-                            }
-                            if (!int.TryParse(clientVersion.AsSpan(clientVersion.Length - 3), out int versionNumber))
-                            {
-                                return;
-                            }
-                            if (versionNumber == Main.curRelease)
-                            {
-                                ClientVersions[index] = -1;
-                                return;
-                            }
-                            if (!_supportedVersions.ContainsKey(versionNumber))
-                            {
-                                return;
-                            }
-                            ClientVersions[index] = versionNumber;
-                            if (!MaxItems.ContainsKey(versionNumber))
-                            {
-                                Log($"Warning: Version {_supportedVersions[versionNumber]} ({versionNumber}) is missing from MaxItems. Item filtering disabled for index {index}.", color: ConsoleColor.Yellow);
-                            }
-                            NetMessage.SendData(9, args.Msg.whoAmI, -1, NetworkText.FromLiteral("Fixing Version..."), 1);
-                            string targetVersion = _supportedVersions.ContainsKey(Main.curRelease) ? _supportedVersions[Main.curRelease] : $"Unknown(v{Main.curRelease})";
-                            Log($"Changing version of index {args.Msg.whoAmI} from {_supportedVersions[versionNumber]} => {targetVersion}", color: ConsoleColor.Green);
-
-                            // Safety: Ensure we don't overwrite memory beyond the packet buffer
-                            if (_cachedVersionFixPacket.Length > args.Length + 3)
-                            {
-                                Log($"[Crossplay] Error: Generated ConnectRequest ({_cachedVersionFixPacket.Length} bytes) is larger than received buffer ({args.Length + 3} bytes).", color: ConsoleColor.Red);
-                                return;
-                            }
-
-                            Buffer.BlockCopy(_cachedVersionFixPacket, 0, args.Msg.readBuffer, args.Index - 3, _cachedVersionFixPacket.Length);
-                    }
-                    catch { }
+                NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, index, null, projIndex);
+                args.Handled = true;
             }
         }
 
-        private void OnSendData(SendDataEventArgs args)
+        private void HandleNpcAddBuff(GetDataEventArgs args)
         {
-            if (args.Handled) return;
+            if (args.Length < 6) return;
 
-            if (args.MsgId == PacketTypes.UpdateItemDrop)
+            short npcId;
+            ushort buffType;
+            int buffTime;
+
+            if (args.Length >= 8)
             {
-                int itemIdx = args.number;
-                if (itemIdx < 0 || itemIdx >= Main.maxItems) return;
+                var packet = MemoryMarshal.Read<NpcAddBuffPacketLarge>(args.Msg.readBuffer.AsSpan(args.Index));
+                npcId = packet.NpcId;
+                buffType = packet.BuffType;
+                buffTime = packet.BuffTime;
+            }
+            else
+            {
+                var packet = MemoryMarshal.Read<NpcAddBuffPacketSmall>(args.Msg.readBuffer.AsSpan(args.Index));
+                npcId = packet.NpcId;
+                buffType = packet.BuffType;
+                buffTime = packet.BuffTime;
+            }
 
-                dynamic item = Main.item[itemIdx];
-                if (item.type == 0) return; // Air is always fine
-
-                if (args.remoteClient != -1)
+            if (npcId >= 0 && npcId < Main.maxNPCs)
+            {
+                if (Main.npc[npcId].active)
                 {
-                    if (ShouldFilterItem(item.type, args.remoteClient))
-                    {
-                        args.Handled = true;
-                        SendEmptyItem(args.MsgId, itemIdx, args.remoteClient);
-                    }
+                    Main.npc[npcId].AddBuff(buffType, buffTime);
+                    NetMessage.SendData((int)PacketTypes.NpcAddBuff, -1, args.Msg.whoAmI, null, npcId, buffType, buffTime);
                 }
-                else
-                {
-                    // Broadcast: Check if ANY connected client needs filtering
-                    bool needsFiltering = false;
-                    for (int i = 0; i < Main.maxPlayers; i++)
-                    {
-                        if (TShock.Players[i] != null && TShock.Players[i].Active && i != args.ignoreClient)
-                        {
-                            if (ShouldFilterItem(item.type, i))
-                            {
-                                needsFiltering = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (needsFiltering)
-                    {
-                        args.Handled = true;
-                        // Re-broadcast manually
-                        for (int i = 0; i < Main.maxPlayers; i++)
-                        {
-                            if (TShock.Players[i] == null || !TShock.Players[i].Active || i == args.ignoreClient) continue;
-
-                            if (ShouldFilterItem(item.type, i))
-                            {
-                                SendEmptyItem(args.MsgId, itemIdx, i);
-                            }
-                            else
-                            {
-                                // Send original packet
-                                using (var factory = new PacketFactory())
-                                {
-                                    byte[] packet = factory
-                                        .SetType((short)args.MsgId)
-                                        .PackInt16((short)itemIdx)
-                                        .PackSingle(item.position.X)
-                                        .PackSingle(item.position.Y)
-                                        .PackSingle(item.velocity.X)
-                                        .PackSingle(item.velocity.Y)
-                                        .PackInt16((short)item.stack)
-                                        .PackByte(item.prefix)
-                                        .PackByte((byte)(args.number2 == 1f ? 1 : 0))
-                                        .PackInt16((short)item.netID)
-                                        .GetByteData();
-                                    TShock.Players[i].SendRawData(packet);
-                                }
-                            }
-                        }
-                    }
-                }
+                args.Handled = true;
             }
         }
 
-        private void SendEmptyItem(PacketTypes msgId, int itemIdx, int playerIndex)
+        private void HandlePlayerInfo(GetDataEventArgs args)
         {
-            using (var factory = new PacketFactory())
+            if (!Config.Settings.SupportJourneyClients)
             {
-                byte[] packet = factory
-                    .SetType((short)msgId)
-                    .PackInt16((short)itemIdx)
-                    .PackSingle(0).PackSingle(0).PackSingle(0).PackSingle(0) // Pos/Vel
-                    .PackInt16(0) // Stack
-                    .PackByte(0)  // Prefix
-                    .PackByte(0)  // NoDelay
-                    .PackInt16(0) // NetID
-                    .GetByteData();
-                TShock.Players[playerIndex].SendRawData(packet);
+                return;
+            }
+            if (args.Length < 1) return;
+            ref byte gameModeFlags = ref args.Msg.readBuffer[args.Index + args.Length - 1];
+            if (Main.GameMode == 3)
+            {
+                if ((gameModeFlags & 8) != 8)
+                {
+                    Log($"Enabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
+                    gameModeFlags |= 8;
+                    if (Main.ServerSideCharacter)
+                    {
+                        NetMessage.SendData(4, args.Msg.whoAmI, -1, null, args.Msg.whoAmI);
+                    }
+                }
+                return;
+            }
+            if (TShock.Config.Settings.SoftcoreOnly && (gameModeFlags & 3) != 0)
+            {
+                return;
+            }
+            if ((gameModeFlags & 8) == 8)
+            {
+                Log($"Disabled journey mode for index {args.Msg.whoAmI}", color: ConsoleColor.Green);
+                gameModeFlags &= 247;
             }
         }
 
-        private bool ShouldFilterItem(int netID, int playerIndex)
+        private void HandleConnectRequest(GetDataEventArgs args)
         {
-            int version = ClientVersions[playerIndex];
-            if (version == 0 || version == -1) return false; // Unknown or same version
-            
-            if (MaxItems.TryGetValue(version, out int maxItem))
+            int index = args.Msg.whoAmI;
+            // Optimization: Read string manually to avoid BinaryReader/MemoryStream allocation
+            // Version string is short ("Terraria" + version), so length is always 1 byte (< 128)
+            if (args.Length < 1) return;
+            int strLen = args.Msg.readBuffer[args.Index];
+            if (strLen >= 128) return;
+            if (args.Length < strLen + 1) return;
+
+            string clientVersion = Encoding.UTF8.GetString(args.Msg.readBuffer, args.Index + 1, strLen);
+            if (clientVersion.Length != 11)
             {
-                return netID > maxItem;
+                args.Handled = true;
+                return;
             }
-            return false;
+            if (!int.TryParse(clientVersion.AsSpan(clientVersion.Length - 3), out int versionNumber))
+            {
+                return;
+            }
+            if (versionNumber == Main.curRelease)
+            {
+                ClientVersions[index] = -1;
+                return;
+            }
+            if (!_supportedVersions.ContainsKey(versionNumber))
+            {
+                return;
+            }
+            ClientVersions[index] = versionNumber;
+            if (!MaxItems.ContainsKey(versionNumber))
+            {
+                Log($"Warning: Version {_supportedVersions[versionNumber]} ({versionNumber}) is missing from MaxItems. Item filtering disabled for index {index}.", color: ConsoleColor.Yellow);
+            }
+            NetMessage.SendData(9, args.Msg.whoAmI, -1, NetworkText.FromLiteral("Fixing Version..."), 1);
+            string targetVersion = _supportedVersions.ContainsKey(Main.curRelease) ? _supportedVersions[Main.curRelease] : $"Unknown(v{Main.curRelease})";
+            Log($"Changing version of index {args.Msg.whoAmI} from {_supportedVersions[versionNumber]} => {targetVersion}", color: ConsoleColor.Green);
+
+            // Safety: Ensure we don't overwrite memory beyond the packet buffer
+            if (_cachedVersionFixPacket.Length > args.Length + 3)
+            {
+                Log($"[Crossplay] Error: Generated ConnectRequest ({_cachedVersionFixPacket.Length} bytes) is larger than received buffer ({args.Length + 3} bytes).", color: ConsoleColor.Red);
+                return;
+            }
+
+            Buffer.BlockCopy(_cachedVersionFixPacket, 0, args.Msg.readBuffer, args.Index - 3, _cachedVersionFixPacket.Length);
         }
 
         private void OnGameUpdate(EventArgs args)
@@ -565,17 +609,17 @@ namespace Crossplay
             if ((DateTime.UtcNow - _lastItemCheck).TotalSeconds < 1) return;
             _lastItemCheck = DateTime.UtcNow;
 
-            int activeItemCount = 0;
-            int maxItems = Config.Settings.MaxDroppedItems;
+            int maxDroppedItems = Config.Settings.MaxDroppedItems;
             int maxTime = Config.Settings.ItemDespawnSeconds * 60;
 
-            // First pass: Despawn old items and count
+            _survivingItemsCache.Clear();
+
+            // Single pass to despawn old items and collect survivors.
             for (int i = 0; i < Main.maxItems; i++)
             {
                 dynamic item = Main.item[i];
                 if (item.active)
                 {
-                    // Check despawn time
                     if (item.time >= maxTime)
                     {
                         item.SetDefaults(0);
@@ -583,30 +627,21 @@ namespace Crossplay
                     }
                     else
                     {
-                        activeItemCount++;
+                        _survivingItemsCache.Add((i, (int)item.time));
                     }
                 }
             }
 
-            // Second pass: Enforce max limit if exceeded
-            if (activeItemCount > maxItems)
+            // Now, enforce the max limit only on the surviving items.
+            if (_survivingItemsCache.Count > maxDroppedItems)
             {
-                // Find items to remove (oldest first)
-                var activeIndices = new List<int>();
-                for (int i = 0; i < Main.maxItems; i++)
-                {
-                    if (((dynamic)Main.item[i]).active)
-                    {
-                        activeIndices.Add(i);
-                    }
-                }
+                // Sort by time to find the oldest items to remove (oldest have highest time).
+                _survivingItemsCache.Sort((a, b) => b.time.CompareTo(a.time));
 
-                activeIndices.Sort((a, b) => ((dynamic)Main.item[b]).time.CompareTo(((dynamic)Main.item[a]).time));
-
-                int toRemove = activeItemCount - maxItems;
+                int toRemove = _survivingItemsCache.Count - maxDroppedItems;
                 for (int i = 0; i < toRemove; i++)
                 {
-                    int idx = activeIndices[i];
+                    int idx = _survivingItemsCache[i].index;
                     dynamic item = Main.item[idx];
                     item.SetDefaults(0);
                     NetMessage.SendData((int)PacketTypes.UpdateItemDrop, -1, -1, null, idx);
@@ -626,14 +661,26 @@ namespace Crossplay
                 if (Config.Settings.DebugMode)
                 {
                     Console.ForegroundColor = color;
-                    Console.WriteLine($"[Crossplay Debug] {message}");
+                    // Adding timestamp for consistency with TShock logs
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [Crossplay Debug] {message}");
                     Console.ResetColor();
                 }
                 return;
             }
-            Console.ForegroundColor = color;
-            Console.WriteLine($"[Crossplay] {message}");
-            Console.ResetColor();
+
+            string logMessage = $"[Crossplay] {message}";
+            switch (color)
+            {
+                case ConsoleColor.Red:
+                    TShock.Log.Error(logMessage);
+                    break;
+                case ConsoleColor.Yellow:
+                    TShock.Log.Warn(logMessage);
+                    break;
+                default:
+                    TShock.Log.Info(logMessage);
+                    break;
+            }
         }
     }
 }

@@ -10,6 +10,10 @@
 - Fixed "ghost items" and pickup issues for mobile players by filtering unsupported item drops.
 - Added Item Limiter to reduce server lag (configurable max items and despawn time).
 - Added `/crossplay clear` command to manually remove all dropped items.
+- Added `/crossplay version` command and granular permissions (`crossplay.clear`, `crossplay.check`).
+- Added configuration options for `show_startup_banner` and `enable_npc_buff_fix`.
+- Added `/crossplay resetconfig` command to restore the default configuration.
+- Optimized item limiter to reduce memory allocations.
 - Added Gemini attribution to README.
 
 ## v2.6

@@ -18,7 +18,7 @@ namespace Crossplay
             }
         }
 
-        public PacketFactory SetType(short type)
+        public PacketFactory SetType(byte type)
         {
             long currentPosition = writer.BaseStream.Position;
             writer.BaseStream.Position = 2L;
@@ -112,7 +112,7 @@ namespace Crossplay
             return memoryStream.ToArray();
         }
 
-        public byte[] ToArray()
+        private byte[] ToArray()
         {
             return memoryStream.ToArray();
         }
